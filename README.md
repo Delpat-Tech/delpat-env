@@ -1,7 +1,11 @@
 # @delpat/env
 
-One command writes a working env file. No secret value is ever printed, and every pull
-is on record in Delpat OS.
+The command-line half of **Dead Drop**, the credential system in Delpat OS. One command
+writes a working env file. No secret value is ever printed, and every pull is on record.
+
+A dead drop is how a secret changes hands without the two parties ever meeting. This
+script is the collection point: a model can ask for a ticket and run the command, and
+the file lands on disk without the model ever seeing what is in it.
 
 > Secrets go **server → script → disk**. Never **server → model → disk**.
 >
