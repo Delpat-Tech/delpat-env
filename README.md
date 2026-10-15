@@ -19,7 +19,7 @@ place to fix a bug:
 
 ```json
 "devDependencies": {
-  "@delpat/env": "github:Delpat-Tech/env-cli#v1.0.0"
+  "@delpat/env": "github:Delpat-Tech/delpat-env#v1.0.0"
 }
 ```
 
