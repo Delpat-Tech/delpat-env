@@ -1,0 +1,21 @@
+{
+  "name": "@delpat/env",
+  "version": "1.0.0",
+  "description": "Writes a working env file from Delpat OS. Never prints a value.",
+  "type": "module",
+  "private": false,
+  "license": "UNLICENSED",
+  "bin": {
+    "delpat-env": "./bin/delpat-env.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "delpat-env": "node ./bin/delpat-env.mjs"
+  }
+}
