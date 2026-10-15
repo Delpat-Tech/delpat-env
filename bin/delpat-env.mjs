@@ -13,7 +13,8 @@
  *   - refuses to write a target that git would track
  *   - prints key names only
  *
- * See docs/credentials.md. The rule the whole system follows is: secrets go
+ * Part of Dead Drop, the credential system in Delpat OS (its design doc lives in
+ * that private repo). The rule the whole system follows is: secrets go
  * server -> script -> disk, never server -> model -> disk. This file is the "script".
  */
 
