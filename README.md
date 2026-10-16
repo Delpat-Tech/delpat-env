@@ -23,15 +23,26 @@ place to fix a bug:
 }
 ```
 
-## The manifest
+## The manifest, which is optional
 
-`.delpat-env.json`, committed at the repo root. It contains no secrets:
+Without one, `pull` writes to `.env`, or to wherever `--out` says:
+
+```
+npx delpat-env pull --ticket tkt_... --out .env.local
+```
+
+Either way the file must be gitignored; that check is not optional, and it is what
+actually protects you rather than the manifest did.
+
+Add `.delpat-env.json` at the repo root when the repo has something to say that the
+server cannot know: which file the env belongs in, and which keys it expects. It is
+committed, and contains no secrets:
 
 ```json
 {
   "project": "delpat-os",
   "target": ".env.local",
-  "keys": ["MONGODB_URI", "JWT_SECRET", "ADMIN_PASSWORD", "RESEND_API_KEY"]
+  "keys": ["MONGODB_URI", "JWT_SECRET", "SECRETS_MASTER_KEY", "RESEND_API_KEY"]
 }
 ```
 

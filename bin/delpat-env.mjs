@@ -58,12 +58,15 @@ function repoRootFrom(cwd) {
         'delpat-env writes into a repo, and checks the target is gitignored before it does.');
 }
 
+/**
+ * The manifest is optional, and exists for the things only the repo knows: which file
+ * the env belongs in, and which keys it expects. A repo that just wants its .env does
+ * not need one - requiring a file to be created before a single pull can happen made
+ * the common case the awkward one. Returns null when there is none.
+ */
 function readManifest(repoRoot) {
     const file = path.join(repoRoot, MANIFEST);
-    if (!fs.existsSync(file)) {
-        die(`no ${MANIFEST} found at the repo root (${repoRoot}).`,
-            `Create one: { "project": "<slug>", "target": ".env.local", "keys": ["..."] }`);
-    }
+    if (!fs.existsSync(file)) return null;
     let parsed;
     try {
         parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -230,9 +233,10 @@ function parseArgs(argv) {
     const out = { _: [] };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
-        if (a === '--ticket' || a === '--url') out[a.slice(2)] = argv[++i];
+        if (a === '--ticket' || a === '--url' || a === '--out') out[a.slice(2)] = argv[++i];
         else if (a.startsWith('--ticket=')) out.ticket = a.slice(9);
         else if (a.startsWith('--url=')) out.url = a.slice(6);
+        else if (a.startsWith('--out=')) out.out = a.slice(6);
         else if (a === '-h' || a === '--help') out.help = true;
         else if (a.startsWith('-')) die(`unknown option "${a}".`, 'Run delpat-env --help.');
         else out._.push(a);
@@ -263,7 +267,12 @@ async function cmdPull(args) {
 
     const repoRoot = repoRootFrom(process.cwd());
     const manifest = readManifest(repoRoot);
-    const abs = resolveTarget(repoRoot, manifest.target);
+
+    /* --out wins, then the manifest, then .env. The default is a guess, but a safe
+       one: the gitignore check below is what actually protects you, and it refuses
+       whatever the target turned out to be if git would track it. */
+    const target = args.out || manifest?.target || '.env';
+    const abs = resolveTarget(repoRoot, target);
     assertGitignored(repoRoot, abs);
 
     const body = await redeem(base, ticket);
@@ -281,6 +290,13 @@ async function cmdPull(args) {
         say('');
         say('Stored but could not be decrypted, and so NOT written:');
         for (const k of body.undecryptable) say(`  ${k}`);
+    }
+
+    if (!manifest) {
+        say('');
+        say(`No ${MANIFEST} here, so nothing was checked against an expected key list.`);
+        say(`Add one if you want that: { "project": "<slug>", "target": "${path.relative(repoRoot, abs).split(path.sep).join('/')}", "keys": [...] }`);
+        return;
     }
 
     const expected = new Set(manifest.keys);
@@ -302,6 +318,13 @@ async function cmdPull(args) {
 function cmdCheck() {
     const repoRoot = repoRootFrom(process.cwd());
     const manifest = readManifest(repoRoot);
+    /* `check` compares what is on disk against what the repo says it expects, so
+       unlike `pull` it has nothing to do without a manifest. Said plainly here rather
+       than left to fail on a null a line later. */
+    if (!manifest) {
+        die(`no ${MANIFEST} at the repo root (${repoRoot}), and check has nothing to compare against.`,
+            `Create one: { "project": "<slug>", "target": ".env", "keys": ["..."] }`);
+    }
     const abs = resolveTarget(repoRoot, manifest.target);
     const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
 
@@ -335,7 +358,9 @@ const HELP = `delpat-env — write a working env file from Delpat OS.
   delpat-env check                    compare the target file's key names against ${MANIFEST}
 
 Options
-  --ticket <t>   the ticket, from Claude Code or Delpat OS. Also DELPAT_TICKET.
+  --ticket <t>   the ticket, from Delpat OS or the request_env_ticket MCP tool.
+                 Also DELPAT_TICKET.
+  --out <path>   where to write, if there is no .delpat-env.json. Default .env.
   --url <u>      the Delpat OS base URL. Also DELPAT_OS_URL. Default ${DEFAULT_BASE}.
 
 ${MANIFEST}, committed at the repo root, no secrets in it:
