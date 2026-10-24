@@ -1,7 +1,8 @@
 # @delpat/env
 
-The command-line half of **Dead Drop**, the credential system in Delpat OS. One command
-writes a working env file. No secret value is ever printed, and every pull is on record.
+The command-line half of **Dead Drop**, the credential system in Delpat OS. Two short
+commands write a working env file. No secret value is ever printed, and every pull is
+on record.
 
 A dead drop is how a secret changes hands without the two parties ever meeting. This
 script is the collection point: a model can ask for a ticket and run the command, and
@@ -19,7 +20,7 @@ place to fix a bug:
 
 ```json
 "devDependencies": {
-  "@delpat/env": "github:Delpat-Tech/delpat-env#v1.0.0"
+  "@delpat/env": "github:Delpat-Tech/delpat-env#v2.0.0"
 }
 ```
 
@@ -53,22 +54,62 @@ idle expiry, server side.
 
 ## Use
 
+### An agent: two commands
+
+The ticket is a bearer value, and a model is a thing that writes its reasoning down. So
+the ticket alone is not enough to pull: it is bound to a secret the model never sees.
+
+`begin` makes a random **verifier** on this machine, keeps it in
+`~/.delpat-env/pending/` at mode 0600, and prints only its SHA-256 — the **challenge**.
+The challenge goes to Delpat OS with the ticket request. `pull` reads the verifier back
+and sends it with the ticket. A ticket that leaks into a transcript, a log, an issue or
+a URL is worthless to anyone who is not on this machine.
+
+```
+npx -y github:Delpat-Tech/delpat-env#v2.0.0 begin
+```
+
+It prints the challenge, the `request_env_ticket` arguments to send, and the exact
+command to run next. Ask Delpat OS for the ticket with that challenge, then run the
+command it printed, within the ticket's 60 seconds:
+
+```
+npx -y github:Delpat-Tech/delpat-env#v2.0.0 pull --ticket tkt_... --challenge <challenge>
+```
+
+The verifier is deleted however that pull ends — written, refused or thrown — because a
+verifier that outlives its use has stopped being single-use. A verifier nobody spent is
+swept after ten minutes.
+
+### A person with a browser-minted ticket: one command
+
+A ticket you minted yourself in Delpat OS needs no challenge. You chose where it went,
+so there is nobody to prove the machine to:
+
 ```
 npx delpat-env pull --ticket tkt_...
+```
+
+### Either way
+
+```
 npx delpat-env check
 ```
 
-`pull` redeems the ticket and writes the target. `check` compares the key names already
-in the target against the manifest — no server, no ticket, no values.
+`pull` redeems the ticket and writes the target, reporting how many keys it wrote, to
+where, and which environment they came from. `check` compares the key names already in
+the target against the manifest — no server, no ticket, no values.
 
-A ticket lasts 60 seconds, works once, and covers one project. Ask Claude Code (the
-`request_access` MCP tool) or Delpat OS for one.
+A ticket lasts 60 seconds, works once, and covers one vault. Ask Claude Code (the
+`request_env_ticket` MCP tool) or Delpat OS for one.
 
 Configuration, all optional:
 
 | | |
 |---|---|
 | `--ticket`, `DELPAT_TICKET` | the ticket |
+| `--challenge` | the challenge `begin` printed, for an agent pull |
+| `--out` | where to write, when there is no manifest |
 | `--url`, `DELPAT_OS_URL` | the Delpat OS base URL, default `https://os.delpat.in` |
 
 ## What it guarantees
@@ -82,8 +123,11 @@ Configuration, all optional:
 - **Refuses any target outside the repo root**, resolved rather than string-matched.
 - **Refuses a target git would track.** Not gitignored, or gitignored but already
   tracked, and it stops with the line to add to `.gitignore`.
-- **Prints key names only**, plus how many were written and anything the manifest
-  expected that the vault did not have.
+- **Prints key names only**, plus how many were written, which environment they came
+  from, and anything the manifest expected that the vault did not have.
+- **The verifier never leaves the machine.** `begin` prints its hash and nothing else,
+  and `pull` deletes the file however the pull ended. There is no persistent secret
+  here and nothing to provision.
 
 ## Exit codes
 

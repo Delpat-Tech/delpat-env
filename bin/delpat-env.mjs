@@ -20,11 +20,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 const MANIFEST = '.delpat-env.json';
 const DEFAULT_BASE = 'https://os.delpat.in';
+
+/* The command an agent is told to run: printed by `begin`, and named in the server's
+   refusal when a challenge is missing. Pinned, because an agent following an unpinned
+   line would be running whatever main happened to be. */
+const PKG_REF = 'github:Delpat-Tech/delpat-env#v2.0.0';
 
 /* --- output ---------------------------------------------------------------- */
 
@@ -191,14 +197,66 @@ function writeAtomic(absTarget, contents) {
     }
 }
 
+/* --- the pending verifier ---------------------------------------------------
+
+   `begin` mints a random verifier here and prints only its SHA-256. The ticket the
+   model then asks for is bound to that hash, so a ticket that leaks into a transcript,
+   a log, an issue or a URL cannot be redeemed by anyone who does not also hold this
+   file. The verifier itself never goes near the model and never leaves the machine.
+
+   Home rather than the repo: nothing to gitignore, and two agents working in one
+   checkout cannot collide, because the challenge is the filename. */
+
+const PENDING_MAX_AGE_MS = 10 * 60 * 1000;
+const CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
+
+function pendingDir() {
+    return path.join(os.homedir(), '.delpat-env', 'pending');
+}
+
+/* A challenge arrives on the command line and becomes a filename, so it is held to the
+   exact shape `begin` writes before it is ever joined to a path. */
+function pendingFileFor(challenge) {
+    if (!CHALLENGE_RE.test(String(challenge))) {
+        die('that is not a challenge.',
+            'A challenge is the 43-character value begin prints. Run begin again.');
+    }
+    return path.join(pendingDir(), challenge);
+}
+
+/**
+ * A verifier is single-use, so one left behind by an abandoned `begin` is a nonce
+ * nobody ever spent. Ten minutes is far longer than the 60-second ticket it belongs
+ * to, so a sweep cannot race a pull that is still in flight.
+ */
+function sweepPending() {
+    let names;
+    try { names = fs.readdirSync(pendingDir()); } catch { return; }
+    const cutoff = Date.now() - PENDING_MAX_AGE_MS;
+    for (const name of names) {
+        const file = path.join(pendingDir(), name);
+        try {
+            if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file);
+        } catch { /* a file another run has already taken is not an error */ }
+    }
+}
+
+function forgetPending(file) {
+    try { fs.unlinkSync(file); } catch { /* already gone is the outcome we wanted */ }
+}
+
 /* --- the server ------------------------------------------------------------- */
 
 /**
  * The only place a response body is touched. A failure is reported by status alone:
  * echoing a server error is exactly how a value ends up in a transcript.
  */
-async function redeem(baseUrl, ticket) {
-    const url = `${baseUrl.replace(/\/+$/, '')}/api/env/pull?ticket=${encodeURIComponent(ticket)}`;
+async function redeem(baseUrl, ticket, verifier) {
+    /* The verifier is the same class of value as the ticket already in the query:
+       single-use, and spent on arrival whether or not it matches. */
+    const query = `ticket=${encodeURIComponent(ticket)}`
+        + (verifier ? `&verifier=${encodeURIComponent(verifier)}` : '');
+    const url = `${baseUrl.replace(/\/+$/, '')}/api/env/pull?${query}`;
     let res;
     try {
         res = await fetch(url, { headers: { accept: 'application/json', 'user-agent': 'delpat-env' } });
@@ -233,7 +291,14 @@ function parseArgs(argv) {
     const out = { _: [] };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
-        if (a === '--ticket' || a === '--url' || a === '--out') out[a.slice(2)] = argv[++i];
+        if (a === '--ticket' || a === '--url' || a === '--out' || a === '--challenge') {
+            const value = argv[++i];
+            /* Without this a trailing --challenge is silently dropped, and the pull
+               quietly falls back to the one-step path instead of saying so. */
+            if (value === undefined) die(`${a} needs a value.`);
+            out[a.slice(2)] = value;
+        }
+        else if (a.startsWith('--challenge=')) out.challenge = a.slice(12);
         else if (a.startsWith('--ticket=')) out.ticket = a.slice(9);
         else if (a.startsWith('--url=')) out.url = a.slice(6);
         else if (a.startsWith('--out=')) out.out = a.slice(6);
@@ -258,7 +323,65 @@ function keyNamesIn(file) {
         .filter(Boolean);
 }
 
+/**
+ * Half of a PKCE exchange, with the model standing where the network used to: it is
+ * handed the challenge and never the verifier, so the ticket it carries is redeemable
+ * only on this machine. There is no persistent secret here — the verifier is a nonce
+ * that `pull` deletes.
+ */
+function cmdBegin() {
+    sweepPending();
+
+    /* 32 bytes is 43 base64url characters with no padding: inside verifyPkce's 43..128
+       bound and within its unreserved alphabet, so the server hashes it unchanged. */
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+
+    const dir = pendingDir();
+    try {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        // 'wx' with the mode given at creation, so the file never exists readable to
+        // anyone else, not even for the moment between a write and a chmod.
+        const fd = fs.openSync(path.join(dir, challenge), 'wx', 0o600);
+        fs.writeFileSync(fd, verifier, { encoding: 'utf8' });
+        fs.closeSync(fd);
+    } catch (err) {
+        die(`could not write the pending verifier (${err.code || err.message}).`);
+    }
+    // Windows ignores the mode bits; on POSIX this reasserts them.
+    try { fs.chmodSync(path.join(dir, challenge), 0o600); } catch { /* not fatal */ }
+
+    say(`Challenge: ${challenge}`);
+    say('');
+    say('1. Ask Delpat OS for a ticket. Call request_env_ticket with:');
+    say(`     { "projectId": "<the project>", "environment": "<development|staging|production>", "challenge": "${challenge}" }`);
+    say('');
+    say('2. Within 60 seconds of receiving the ticket, run exactly this, in this repository:');
+    say(`     npx -y ${PKG_REF} pull --ticket <ticket> --challenge ${challenge}`);
+    say('');
+    say('The verifier stays on this machine. Never fetch the ticket URL yourself.');
+}
+
 async function cmdPull(args) {
+    sweepPending();
+
+    /* The verifier is claimed before anything else happens, and deleted however this
+       run ends — written, refused, or thrown. A verifier still on disk after a run
+       that read it is a nonce that stopped being single-use.
+
+       Without --challenge none of this happens: a browser-minted ticket carries no
+       challenge, and keeping that path one step is deliberate. */
+    let verifier;
+    if (args.challenge) {
+        const pending = pendingFileFor(args.challenge);
+        process.on('exit', () => forgetPending(pending));
+        try {
+            verifier = fs.readFileSync(pending, 'utf8').trim();
+        } catch {
+            die('no pending pull for that challenge; run `begin` again.');
+        }
+    }
+
     const ticket = args.ticket || process.env.DELPAT_TICKET;
     if (!ticket) {
         die('no ticket.', 'Pass --ticket <ticket>, or set DELPAT_TICKET. Ask Claude Code for one, or use Delpat OS.');
@@ -275,15 +398,22 @@ async function cmdPull(args) {
     const abs = resolveTarget(repoRoot, target);
     assertGitignored(repoRoot, abs);
 
-    const body = await redeem(base, ticket);
+    const body = await redeem(base, ticket, verifier);
     const keys = Object.keys(body.values).sort();
     if (!keys.length) die('that vault has no keys in it yet.');
 
-    const header = `# Written by delpat-env from Delpat OS on ${new Date().toISOString()}.\n# Do not commit. Re-run \`npx delpat-env pull --ticket <ticket>\` to refresh.`;
+    /* A name, never a value. Which environment the file came from is the one thing a
+       reader cannot work out from the key names, and getting it wrong is how a
+       production database ends up behind a development server. */
+    const environment = typeof body.environment === 'string' && body.environment ? body.environment : null;
+
+    const header = `# Written by delpat-env from Delpat OS on ${new Date().toISOString()}.`
+        + (environment ? `\n# Environment: ${environment}.` : '')
+        + '\n# Do not commit. Re-run `npx delpat-env pull --ticket <ticket>` to refresh.';
     writeAtomic(abs, renderEnv(body.values, header));
 
     const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
-    say(`Wrote ${keys.length} keys to ${rel} (mode 0600).`);
+    say(`Wrote ${keys.length} keys${environment ? ` (${environment})` : ''} to ${rel} (mode 0600).`);
     for (const k of keys) say(`  ${k}`);
 
     if (Array.isArray(body.undecryptable) && body.undecryptable.length) {
@@ -354,14 +484,29 @@ function cmdCheck() {
 
 const HELP = `delpat-env — write a working env file from Delpat OS.
 
-  delpat-env pull --ticket <ticket>   redeem a ticket and write the target file
+For an agent, two commands. begin mints a verifier on this machine and prints only its
+hash; the ticket you then ask Delpat OS for is bound to that hash, so the ticket is
+worthless to anyone who does not hold the verifier:
+
+  delpat-env begin                                   print a challenge and the next command
+  delpat-env pull --ticket <t> --challenge <c>       redeem it and write the target file
+
+For a person holding a ticket minted in Delpat OS in a browser, one command — you chose
+where that ticket went, so there is nothing to bind:
+
+  delpat-env pull --ticket <t>
+
+And, with no server and no ticket:
+
   delpat-env check                    compare the target file's key names against ${MANIFEST}
 
 Options
-  --ticket <t>   the ticket, from Delpat OS or the request_env_ticket MCP tool.
-                 Also DELPAT_TICKET.
-  --out <path>   where to write, if there is no .delpat-env.json. Default .env.
-  --url <u>      the Delpat OS base URL. Also DELPAT_OS_URL. Default ${DEFAULT_BASE}.
+  --ticket <t>      the ticket, from Delpat OS or the request_env_ticket MCP tool.
+                    Also DELPAT_TICKET.
+  --challenge <c>   the challenge begin printed. The verifier it stands for is read from
+                    ~/.delpat-env/pending/<challenge> and deleted on any outcome.
+  --out <path>      where to write, if there is no ${MANIFEST}. Default .env.
+  --url <u>         the Delpat OS base URL. Also DELPAT_OS_URL. Default ${DEFAULT_BASE}.
 
 ${MANIFEST}, committed at the repo root, no secrets in it:
 
@@ -375,6 +520,7 @@ async function main() {
     const args = parseArgs(process.argv.slice(2));
     const cmd = args._[0];
     if (args.help || !cmd) { say(HELP); return; }
+    if (cmd === 'begin') return cmdBegin();
     if (cmd === 'pull') return cmdPull(args);
     if (cmd === 'check') return cmdCheck();
     die(`unknown command "${cmd}".`, 'Run delpat-env --help.');
