@@ -108,17 +108,26 @@ test('the pending file is 0600', { skip: POSIX ? false : 'Windows ignores the mo
     assert.equal(fs.statSync(path.join(pending, challenge)).mode & 0o777, 0o600);
 });
 
-test('a pending file older than ten minutes is swept', async () => {
+test('a pending file older than the sweep window is taken, a fresh one is not', async () => {
     const { home, pending } = fakeHome();
     const fresh = challengeFrom((await run(home, ['begin'])).stdout);
 
     const stale = path.join(pending, 'A'.repeat(43));
     fs.writeFileSync(stale, 'x');
-    const old = Date.now() / 1000 - 11 * 60;
+    /* Past the hour the CLI allows. The window is an hour rather than ten minutes
+       because a person approving the app in a browser sits between `begin` and the
+       ticket; a file aged only twenty minutes must survive, so both are asserted. */
+    const old = Date.now() / 1000 - 61 * 60;
     fs.utimesSync(stale, old, old);
+
+    const recent = path.join(pending, 'B'.repeat(43));
+    fs.writeFileSync(recent, 'x');
+    const twentyMinutes = Date.now() / 1000 - 20 * 60;
+    fs.utimesSync(recent, twentyMinutes, twentyMinutes);
 
     await run(home, ['begin']);
     assert.ok(!fs.existsSync(stale), 'the stale verifier survived the sweep');
+    assert.ok(fs.existsSync(recent), 'the sweep took a verifier still inside the window');
     assert.ok(fs.existsSync(path.join(pending, fresh)), 'the sweep took a fresh verifier');
 });
 

@@ -207,7 +207,12 @@ function writeAtomic(absTarget, contents) {
    Home rather than the repo: nothing to gitignore, and two agents working in one
    checkout cannot collide, because the challenge is the filename. */
 
-const PENDING_MAX_AGE_MS = 10 * 60 * 1000;
+/* An hour, not ten minutes: the step before the ticket may be a person approving
+   this app in a browser, and that routinely takes longer than ten. Sweeping sooner
+   throws away a verifier whose challenge is about to be used, which costs a wasted
+   ticket and a re-run. The file is 0600 and useless without its ticket, so a longer
+   window buys nothing for an attacker. */
+const PENDING_MAX_AGE_MS = 60 * 60 * 1000;
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
 
 function pendingDir() {
@@ -266,7 +271,11 @@ async function redeem(baseUrl, ticket, verifier) {
     if (!res.ok) {
         const reason = {
             401: 'that ticket is not valid. Tickets last 60 seconds and work once — ask for a new one.',
-            403: 'you do not have access to this project. Delpat OS has filed a request with an admin.',
+            /* Two different doors answer 403 now: the person's own access to the
+               project, and this app's approval for it. Only the first files anything
+               with an admin, so naming only that one sends the operator to wait on a
+               request nobody made. */
+            403: 'refused. Either you do not have access to this project — Delpat OS has asked an admin — or this app is not approved for it, which only you can fix under Connected Apps in Delpat OS.',
             404: 'no vault for that ticket.',
             409: 'that vault is not linked to a project, so it cannot be pulled. Link it in Delpat OS first.',
             429: 'too many requests. Wait a minute.',
@@ -287,6 +296,14 @@ async function redeem(baseUrl, ticket, verifier) {
 
 /* --- commands --------------------------------------------------------------- */
 
+/* A flag written as --name=value with nothing after the = is a mistake, not an
+   omission: treating it as "not given" is how `--challenge=` quietly became a
+   one-step pull that spent the ticket. */
+function valued(flag, value) {
+    if (!value) die(`${flag.split('=')[0]} needs a value.`);
+    return value;
+}
+
 function parseArgs(argv) {
     const out = { _: [] };
     for (let i = 0; i < argv.length; i++) {
@@ -298,10 +315,10 @@ function parseArgs(argv) {
             if (value === undefined) die(`${a} needs a value.`);
             out[a.slice(2)] = value;
         }
-        else if (a.startsWith('--challenge=')) out.challenge = a.slice(12);
-        else if (a.startsWith('--ticket=')) out.ticket = a.slice(9);
-        else if (a.startsWith('--url=')) out.url = a.slice(6);
-        else if (a.startsWith('--out=')) out.out = a.slice(6);
+        else if (a.startsWith('--challenge=')) out.challenge = valued(a, a.slice(12));
+        else if (a.startsWith('--ticket=')) out.ticket = valued(a, a.slice(9));
+        else if (a.startsWith('--url=')) out.url = valued(a, a.slice(6));
+        else if (a.startsWith('--out=')) out.out = valued(a, a.slice(6));
         else if (a === '-h' || a === '--help') out.help = true;
         else if (a.startsWith('-')) die(`unknown option "${a}".`, 'Run delpat-env --help.');
         else out._.push(a);
@@ -415,7 +432,7 @@ async function cmdPull(args) {
 
     const header = `# Written by delpat-env from Delpat OS on ${new Date().toISOString()}.`
         + (environment ? `\n# Environment: ${environment}.` : '')
-        + '\n# Do not commit. Re-run `npx delpat-env pull --ticket <ticket>` to refresh.';
+        + '\n# Do not commit. To refresh, ask Delpat OS for a new ticket; an agent must run begin first and pull with --challenge.';
     writeAtomic(abs, renderEnv(body.values, header));
 
     const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
