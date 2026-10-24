@@ -365,16 +365,19 @@ function cmdBegin() {
 async function cmdPull(args) {
     sweepPending();
 
-    /* The verifier is claimed before anything else happens, and deleted however this
-       run ends — written, refused, or thrown. A verifier still on disk after a run
-       that read it is a nonce that stopped being single-use.
+    /* Read early so a missing pending file fails before anything else is attempted,
+       but do NOT arm the delete yet. What has to be single-use is a verifier that has
+       been *sent*; one that never left this process is still unspent, and burning it
+       on a local refusal — an untracked .env, a missing repo — would cost a fresh
+       `begin` and a fresh ticket to recover from a mistake the user can fix in a
+       second. The sweep collects anything abandoned.
 
        Without --challenge none of this happens: a browser-minted ticket carries no
        challenge, and keeping that path one step is deliberate. */
     let verifier;
+    let pending;
     if (args.challenge) {
-        const pending = pendingFileFor(args.challenge);
-        process.on('exit', () => forgetPending(pending));
+        pending = pendingFileFor(args.challenge);
         try {
             verifier = fs.readFileSync(pending, 'utf8').trim();
         } catch {
@@ -398,6 +401,9 @@ async function cmdPull(args) {
     const abs = resolveTarget(repoRoot, target);
     assertGitignored(repoRoot, abs);
 
+    /* From here the verifier is going over the wire, so it is spent however this ends
+       — written, refused by the server, or thrown. */
+    if (pending) process.on('exit', () => forgetPending(pending));
     const body = await redeem(base, ticket, verifier);
     const keys = Object.keys(body.values).sort();
     if (!keys.length) die('that vault has no keys in it yet.');
